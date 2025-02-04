@@ -3,7 +3,7 @@ import { LiteClient } from '../wrappers/LiteClient';
 import { compile, NetworkProvider } from '@ton/blueprint';
 import { getConfigFromBlock, getSeqnoFromBlock } from './imports/block';
 import { parseConfigParamValidators, prepareValidatorsList } from './imports/validators';
-import { selectNetwork } from './imports/ui';
+import { selectNetwork, selectWorkchain } from './imports/ui';
 import { Client } from './imports/client';
 import { TransactionChecker } from '../wrappers/TransactionChecker';
 
@@ -25,6 +25,7 @@ async function deployTransactionChecker(provider: NetworkProvider) {
         (v) => v.name,
     );
     const liteClientAddress = await ui.inputAddress('Input LiteClient address');
+    const workchain = await selectWorkchain(provider);
     const transactionChecker = provider.open(
         type.contract.createFromConfig(
             {
@@ -32,11 +33,12 @@ async function deployTransactionChecker(provider: NetworkProvider) {
                 id: Math.floor(Math.random() * 10000),
             },
             await compile(type.name),
+            workchain,
         ),
     );
     console.log(`Deploying ${type.name} `);
 
-    await transactionChecker.sendDeploy(provider.sender(), toNano('0.01'));
+    await transactionChecker.sendDeploy(provider.sender(), workchain == 0 ? toNano('0.01') : toNano('0.1'));
 
     await provider.waitForDeploy(transactionChecker.address);
 
@@ -45,7 +47,7 @@ async function deployTransactionChecker(provider: NetworkProvider) {
 
 async function deployLiteClient(provider: NetworkProvider) {
     const networkForDeploy = await selectNetwork('to sync blocks from', provider);
-    // const networkForBridge = await selectNetwork('bridge', provider);
+    const workchain = await selectWorkchain(provider);
 
     const client = new Client(networkForDeploy);
     await client.setupLiteClient();
@@ -64,9 +66,7 @@ async function deployLiteClient(provider: NetworkProvider) {
     );
 
     const genesysBlock = Cell.fromBoc((await client.liteClient.getBlock(keyBlockFullId)).data)[0];
-    //
-    // const genesysData = testData[syncGenesysBlock];
-    // const genesysBlock = Cell.fromBase64(genesysData.blockBoc);
+
     const genesysSeqno = getSeqnoFromBlock(genesysBlock);
     const genesysConfigCell = getConfigFromBlock(genesysBlock).get(34)!;
     const genesysConfig = parseConfigParamValidators(genesysConfigCell);
@@ -81,9 +81,9 @@ async function deployLiteClient(provider: NetworkProvider) {
     };
     console.log(`Deploying LiteClient with genesys config: `, config);
 
-    const liteClient = provider.open(LiteClient.createFromConfig(config, await compile('LiteClient')));
+    const liteClient = provider.open(LiteClient.createFromConfig(config, await compile('LiteClient'), workchain));
 
-    await liteClient.sendDeploy(provider.sender(), toNano('0.01'));
+    await liteClient.sendDeploy(provider.sender(), workchain == 0 ? toNano('0.01') : toNano('0.1'));
 
     await provider.waitForDeploy(liteClient.address);
 

@@ -36,7 +36,7 @@ export async function run(provider: NetworkProvider) {
     );
     const blockFileHash = await sha256(blockData);
     await transactionChecker.sendCheckTransaction(provider.sender(), {
-        value: toNano('0.05'),
+        value: transactionChecker.address.workChain == 0 ? toNano('0.05') : toNano('0.5'),
         proof: {
             fileHash: blockFileHash,
             signatures: blockSignatures,
