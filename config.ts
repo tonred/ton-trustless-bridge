@@ -3,7 +3,7 @@ import { Config, Network } from './scripts/imports/config';
 export const TESTNET = {
     name: 'Testnet',
     networkId: 0,
-    httpApiEndpoint: 'https://testnet.toncenter.com/api/v2/',
+    httpApiEndpoint: 'https://testnet.toncenter.com/api/v2/jsonRPC',
     // global_config: 'https://ton-blockchain.github.io/testnet-global.config.json',
     globalConfig: {
         liteservers: [
