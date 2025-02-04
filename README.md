@@ -21,8 +21,8 @@ See  [bridge.tlb](./bridge.tlb) for the data structures and method signatures.
 
 ### Fastnet:
 
-- LiteClient: `TBD`
-- TransactionChecker: `TBD`
+- LiteClient: `Ef-JQBay-l4MvYA-9rH9rM_RgRhVW_sJAPtZy1wD41tfxGdd`
+- TransactionChecker: `Ef_LluiK9bUX7sUyZAatMjQKrWw01JA-F236cibbv_CQKMui`
 
 ## Example of transactions
 
