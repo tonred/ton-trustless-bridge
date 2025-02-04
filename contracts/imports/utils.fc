@@ -1,0 +1,51 @@
+#include "stdlib.fc";
+#include "constants.fc";
+
+
+forall X, Y, Z, W, V -> tuple tuple5(X x, Y y, Z z, W w, V v) asm "5 TUPLE";
+forall X, Y, Z, W, V -> (X, Y, Z, W, V) untuple5(tuple t) asm "5 UNTUPLE";
+forall X -> X fifth(tuple t) asm "4 INDEX";
+
+(slice, int) begin_parse_exotic(cell x) asm "XCTOS";
+cell load_ref_1(slice s) asm "1 PLDREFIDX";
+cell load_ref_2(slice s) asm "2 PLDREFIDX";
+cell load_ref_3(slice s) asm "3 PLDREFIDX";
+cell load_ref_n(slice s, int n) asm "PLDREFVAR";
+(slice, (int)) ~load_ones(slice src) asm (-> 1 0) "LDONES";
+
+int get_bit_size(int x) inline asm "UBITSIZE";
+int cell_hash_0(cell c) inline asm "0 CHASHI";
+int slice_has_prefix(slice s, slice pfx) inline asm "SDPFXREV";
+builder store_same(builder b, int n, int x) inline asm "STSAME";
+
+(cell) udict_get_ref(cell dict, int key_len, int index) asm(index dict key_len) "DICTUGETREF" "DROP";
+(slice) udict_get(cell dict, int key_len, int index) asm(index dict key_len) "DICTUGET" "DROP";
+
+
+(cell, int) extract_merkle_proof(cell proof) impure inline {
+    (slice s, int is_exotic) = proof.begin_parse_exotic();
+    throw_unless(error::not_exotic, is_exotic);
+
+    int ty = s~load_uint(8);
+    throw_unless(error::not_merkle_proof, ty == cell_type::merkle_proof);
+
+    return (s~load_ref(), s~load_uint(256));
+}
+
+;;; returns `old_hash`, `new_hash`
+(int, int) extract_merkle_update(cell update) impure inline_ref {
+    (slice s, int is_exotic) = update.begin_parse_exotic();
+    throw_unless(error::not_exotic, is_exotic);
+
+    int ty = s~load_uint(8);
+    throw_unless(error::not_merkle_update, ty == cell_type::merkle_update);
+
+    return (s~load_uint(256), s~load_uint(256));
+}
+
+
+(slice, ()) skip_currency_collection(slice cs) impure inline {
+    cs~load_grams();
+    cs~load_dict();
+    return (cs, ());
+}

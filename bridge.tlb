@@ -1,0 +1,81 @@
+///
+/// LiteClient
+///
+new_key_block#11a78ffe query_id:uint64
+    block:^BridgeBlock signatures:^(HashmapE 16 SignatureDescr)
+    = InternalMsgBody;
+ok#ff8ff4e1 query_id:uint64 block_hash:uint256 = InternalMsgBody;
+
+
+check_block#8eaa9d76 query_id:uint64
+    block:^BridgeBlockShort signatures:^(HashmapE 16 SignatureDescr)
+    callback:(Maybe ^Cell) = InternalMsgBody;
+correct#ce02b807 query_id:uint64 block_hash:uint256 = InternalMsgBody;
+
+get_state#8eaa9d76 query_id:uint64
+    callback:(Maybe ^Cell) = InternalMsgBody;
+state#ce02b807 query_id:uint64
+    state:^LiteClientState callback:(Maybe ^Cell)
+    = InternalMsgBody;
+
+
+/// TransactionChecker
+check_transaction#91d555f7 transaction:^Cell
+    proof:^Cell current_block:^Cell = InternalMsgBody;
+transaction_checked#756adff1 transaction:^Cell = InternalMsgBody;
+
+/// TransactionContactless
+check_transaction#91d555f7 transaction:^Cell
+    proof:^Cell current_block:^Cell = InternalMsgBody;
+transaction_checked#756adff1 transaction:^Cell = InternalMsgBody;
+
+
+
+lite_client_state#_ seq_no:uint32
+    epoch_since:uint32 epoch_until:uint32
+    cutoff_weight:uint64 epoch_until:uint32
+    validators_set:^(HashmapE 16 ValidatorDescrShort) = LiteClientState;
+
+bridge_block#_ file_hash:uint256 block_proof:^(MERKLE_PROOF Block) = BridgeBlock;
+bridge_block_short#_ file_hash:uint256 root_hash:uint256 = BridgeBlockShort;
+_ R:bits256 s:bits256 = SignatureDescr;
+
+validator#_ public_key:bits256 weight:uint64 = ValidatorDescrShort;
+
+
+
+
+
+/// std
+bit$_ (## 1) = Bit;
+
+nothing$0 {X:Type} = Maybe X;
+just$1 {X:Type} value:X = Maybe X;
+
+hm_edge#_ {n:#} {X:Type} {l:#} {m:#} label:(HmLabel ~l n)
+          {n = (~m) + l} node:(HashmapNode m X) = Hashmap n X;
+
+hmn_leaf#_ {X:Type} value:X = HashmapNode 0 X;
+hmn_fork#_ {n:#} {X:Type} left:^(Hashmap n X)
+           right:^(Hashmap n X) = HashmapNode (n + 1) X;
+
+hml_short$0 {m:#} {n:#} len:(Unary ~n) {n <= m} s:(n * Bit) = HmLabel ~n m;
+hml_long$10 {m:#} n:(#<= m) s:(n * Bit) = HmLabel ~n m;
+hml_same$11 {m:#} v:Bit n:(#<= m) = HmLabel ~n m;
+
+unary_zero$0 = Unary ~0;
+unary_succ$1 {n:#} x:(Unary ~n) = Unary ~(n + 1);
+
+hme_empty$0 {n:#} {X:Type} = HashmapE n X;
+hme_root$1 {n:#} {X:Type} root:^(Hashmap n X) = HashmapE n X;
+
+!merkle_update#02 {X:Type} old_hash:bits256 new_hash:bits256
+  old:^X new:^X = MERKLE_UPDATE X;
+update_hashes#72 {X:Type} old_hash:bits256 new_hash:bits256
+  = HASH_UPDATE X;
+!merkle_proof#03 {X:Type} virtual_hash:bits256 depth:uint16 virtual_root:^X = MERKLE_PROOF X;
+
+block#11ef55aa global_id:int32
+  info:^Cell value_flow:^Cell
+  state_update:^(MERKLE_UPDATE Cell)
+  extra:^Cell = Block;

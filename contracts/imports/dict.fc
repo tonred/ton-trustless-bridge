@@ -1,0 +1,57 @@
+#include "stdlib.fc";
+#include "utils.fc";
+
+(slice, slice) read_hml(slice src, int key_len) impure inline {
+    if (src~load_uint(1)) {
+        if (src~load_uint(1)) {
+            ;; hml_same$11
+            int x = src~load_uint(1);
+            slice s = begin_cell().store_same(key_len, x).end_cell().begin_parse();
+            return (src, s);
+        } else {
+            ;; hml_long$10
+            int n = src~load_uint(get_bit_size(key_len));
+            slice s = src~load_bits(n);
+            return (src, s);
+        }
+    } else {
+        ;; hml_short$0
+        int n = src~load_ones();
+        src~skip_bits(1);
+        slice s = src~load_bits(n);
+        return (src, s);
+    }
+}
+
+(slice, int) aug_dict_get(slice cs, slice key) impure inline {
+    int key_len = key.slice_bits();
+    while (key_len > 0) {
+        (cs, slice prefix) = read_hml(cs, key_len);
+        int size = prefix.slice_bits();
+        key_len -= size;
+        if (key_len == 0) {
+            return (cs, -1);
+        }
+        ifnot (slice_has_prefix(key, prefix)) {
+            return (null(), 0);
+        }
+        key~skip_bits(size);
+
+        int is_right = key~load_uint(1);
+        key_len -= 1;
+        if (is_right) {
+            cs = cs.load_ref_1().begin_parse();
+        } else {
+            cs = cs~load_ref().begin_parse();
+        }
+    }
+    return (null(), 0);
+}
+
+slice bintree_search(slice cs) impure inline {
+    while (cs~load_int(1)) {
+        (slice left, int exotic) = cs~load_ref().begin_parse_exotic();
+        cs = exotic ? cs~load_ref().begin_parse() : left;
+    }
+    return cs;
+}

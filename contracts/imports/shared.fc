@@ -1,0 +1,80 @@
+#include "stdlib.fc";
+#include "utils.fc";
+#include "dict.fc";
+
+;;; Verifies that the signatures of a block have sufficient collective weight >= `cutoff_weight`
+;;; Iterates over the signatures and checks each one against the public key from the validators dict.
+;;; Throws an error if signatures are insufficient or invalid.
+() verify_block_signatures(cell signatures, cell validators, int root_hash, int file_hash, int cutoff_weight) impure inline {
+    ;; Prepare the data to be signed
+    slice hash = begin_cell()
+        .store_uint(0x706e0bc5, 32)
+        .store_uint(root_hash, 256)
+        .store_uint(file_hash, 256)
+        .end_cell()
+        .begin_parse();
+
+    int weight = 0;
+    int key = 0;
+    ;; todo if more than 10 signatures to check then run child vm to check signatures with +128 flag
+    do {
+        (key, slice signature, int stopFlag) = signatures.udict_get_nexteq?(16, key);
+
+        ;; If no more signatures are available, but we haven't reached cutoff weight, throw an error
+        throw_unless(error::not_enough_signatures, stopFlag);
+
+        ;; Retrieve validator data (public key + weight)
+        slice data = validators.udict_get(16, key);
+        int pubkey = data~load_uint(256);
+
+        ;; Check signature validity
+        throw_unless(
+            error::invalid_signature,
+            check_data_signature(hash, signature, pubkey)
+        );
+
+        weight += data.preload_uint(64);
+        key += 1;
+
+    } until (weight >= cutoff_weight);
+}
+
+
+
+;;; Loads LiteClient data
+;;; returns tuple with 5 elements:
+;;; 1. `current_seq_no`         - sequence number of current key block
+;;; 2. `current_epoch_since`    - starting timestamp of the current validator epoch
+;;; 3. `current_epoch_until`    - ending timestamp of the current validator epoch
+;;; 4. `current_cutoff_weight`  - minimum total validators weight needed for block confirmation.
+;;; 5. `current_validators_set` - validators set with pubkey and weight, sorted by weight
+tuple parse_lite_client_data(cell data) impure inline {
+    slice cs = data.begin_parse();
+    int current_seq_no = cs~load_uint(32);
+    int current_epoch_since = cs~load_uint(32);
+    int current_epoch_until = cs~load_uint(32);
+    int current_cutoff_weight = cs~load_uint(64);
+    cell current_validators_set = cs~load_ref();
+
+    return tuple5(current_seq_no, current_epoch_since, current_epoch_until, current_cutoff_weight, current_validators_set);
+}
+
+
+() lookup_tx_in_block(cell block, int tx_id, int lt, int account_block_id) impure inline {
+    cell account_blocks = block.begin_parse()
+        .load_ref_3()
+        .begin_parse()
+        .load_ref_2()
+        .begin_parse()
+        .preload_ref();
+
+    (slice account_block, _) = account_blocks
+        .begin_parse()
+        .aug_dict_get(begin_cell().store_uint(account_block_id, 256).end_cell().begin_parse());
+    account_block~skip_currency_collection();
+    account_block~skip_bits(4 + 256);
+    (slice tx, int found) = account_block.aug_dict_get(begin_cell().store_uint(lt, 64).end_cell().begin_parse());
+    throw_unless(error::tx_not_found_in_block, found);
+    int hash = tx~load_ref().cell_hash_0();
+    throw_unless(error::invalid_tx_hash, hash == tx_id);
+}

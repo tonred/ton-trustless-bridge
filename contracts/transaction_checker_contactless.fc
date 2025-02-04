@@ -1,0 +1,194 @@
+;; #include "imports/constants.fc";
+;; #include "imports/stdlib.fc";
+;; #include "imports/utils.fc";
+;; #include "imports/dict.fc";
+;; #include "imports/shared.fc";
+;; #include "imports/transaction_checker_shared.fc";
+;;
+;; tuple get_prev_mc_blocks() impure asm "PREVMCBLOCKS_100";
+;;
+;; global slice ctx_lite_client_addr;
+;;
+;; () load_data() impure inline {
+;;     var ds = get_data().begin_parse();
+;;
+;;     ctx_lite_client_addr = ds~load_msg_addr();
+;;     ds.end_parse();
+;; }
+;;
+;; () save_data() impure inline {
+;;     set_data(
+;;         begin_cell()
+;;             .store_slice(ctx_lite_client_addr)
+;;             .end_cell()
+;;     );
+;; }
+;;
+;; () lookup_mc_block(int seqno, int hash) impure inline {
+;;     tuple prev_mc_blocks = get_prev_mc_blocks();
+;;     int first_seqno = prev_mc_blocks.first().third();
+;;     int diff = first_seqno - seqno;
+;;     throw_unless(error::mc_block_is_too_old, diff < 0);
+;;     ;; [ wc:Integer shard:Integer seqno:Integer root_hash:Integer file_hash:Integer ] = BlockId;
+;;     tuple block = prev_mc_blocks.at(diff - 1);
+;;     throw_unless(error::invalid_mc_block_root_hash, block.fourth() == hash);
+;; }
+;;
+;;
+;; () send_response(int op, slice address, int query_id, cell transaction) impure inline {
+;;     cell msg = begin_cell()
+;;         .store_msg_flags_and_address_none(NON_BOUNCEABLE)
+;;         .store_slice(address)
+;;         .store_coins(0)
+;;         .store_prefix_only_body()
+;;         .store_op(op)
+;;         .store_query_id(query_id)
+;;         .store_ref(transaction)
+;;         .end_cell();
+;;
+;;     send_raw_message(
+;;         msg,
+;;         SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+;;     );
+;; }
+;;
+;; int parse_state_hash_from_block(cell block) inline {
+;;     slice cs = block.begin_parse();
+;;     cell state_update = cs.load_ref_2();
+;;     (_, int state_new_hash) = extract_merkle_update(state_update);
+;;     return state_new_hash;
+;; }
+;;
+;; (int) load_shard_block_hash(cell mc_state) impure inline {
+;;     slice cs = mc_state.begin_parse();
+;;     cell shards_hashes = cs.load_ref_3().begin_parse().preload_ref();
+;;     (slice wc, _) = shards_hashes.idict_get?(32, 0);
+;;     slice shard_descr = bintree_search(wc.preload_ref().begin_parse());
+;;     shard_descr~skip_bits(4 + 32 + 32 + 64 + 64);
+;;     return shard_descr~load_uint(256);
+;; }
+;;
+;; () validate_account_state(cell state, int account_state_hash) impure inline {
+;;     slice cs = state.begin_parse();
+;;     slice accounts = cs.load_ref_1().begin_parse().preload_ref().begin_parse();
+;;     (slice value, _) = aug_dict_get(accounts, ctx_lite_client_addr.slice_last(256));
+;;     throw_unless(error::invalid_account_state_hash, value.preload_ref().cell_hash_0() == account_state_hash);
+;; }
+;;
+;; ;;; returns account state
+;; (cell) validate_state_proof(int mc_seqno, cell block_proof, cell shard_state_proof, cell shard_proof, cell account_state_proof) impure inline {
+;;
+;;     (cell block, int block_hash) = extract_merkle_proof(block_proof);
+;;     (cell shard_state, int state_hash) = extract_merkle_proof(shard_state_proof);
+;;     (cell account_state, int account_state_hash) = extract_merkle_proof(account_state_proof);
+;;
+;;     throw_unless(error::invalid_shard_state_hash, state_hash == parse_state_hash_from_block(block));
+;;
+;;     int root_hash = block_hash;
+;;
+;;     validate_account_state(shard_state, account_state_hash);
+;;
+;;     ifnot (shard_proof.null?()) {
+;;         slice shard_proof_slice = shard_proof.begin_parse();
+;;         cell mc_proof = shard_proof_slice~load_ref();
+;;         cell mc_state_proof = shard_proof_slice~load_ref();
+;;
+;;         (cell mc_block, int mc_hash) = extract_merkle_proof(mc_proof);
+;;         (cell mc_shard_state, int mc_shard_hash) = extract_merkle_proof(mc_state_proof);
+;;
+;;         throw_unless(1110, mc_shard_hash == parse_state_hash_from_block(mc_block));
+;;         throw_unless(1111, block_hash == load_shard_block_hash(mc_shard_state));
+;;         root_hash = mc_hash;
+;;
+;;     }
+;;     ;; lookup_mc_block(mc_seqno, root_hash);
+;;     return account_state;
+;; }
+;;
+;;
+;; () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+;;     if (in_msg_body.slice_empty?()) {
+;;         ;; ignore all empty messages
+;;         return ();
+;;     }
+;;
+;;     slice cs = in_msg_full.begin_parse();
+;;     int flags = cs~load_msg_flags();
+;;
+;;     if (flags & 1) {
+;;         ;; ignore all bounced messages
+;;         return ();
+;;     }
+;;
+;;     load_data();
+;;
+;;     int op = in_msg_body~load_uint(32);
+;;     int query_id = in_msg_body~load_uint(64);
+;;     ;;
+;;     if (op == op::check_transaction) {
+;;         slice tx_data = in_msg_body~load_ref().begin_parse();
+;;         slice proof = in_msg_body~load_ref().begin_parse();
+;;         cell current_block_proof = in_msg_body~load_ref();
+;;         slice tx_data = in_msg_body~load_ref().begin_parse();
+;;
+;;         cell signatures = proof~load_ref();
+;;         cell block_proof = proof~load_ref();
+;;         int file_hash = proof~load_uint(256);
+;;         (cell block, int hash) = extract_merkle_proof(block_proof);
+;;
+;;         cell tx_proof = tx_data~load_ref();
+;;         (_, int tx_hash) = extract_merkle_proof(tx_proof);
+;;         int account_block = tx_data~load_uint(256);
+;;         int tx_lt = tx_data~load_uint(64);
+;;         lookup_tx_in_block(block, tx_hash, tx_lt, account_block);
+;;         slice block_cs = block.begin_parse();
+;;         cell block_info = block_cs.preload_ref();
+;;         check_is_block_mc(block_info);
+;;
+;;         int mc_seqno = current_block_proof~load_uint(32);
+;;         cell block_proof = current_block_proof~load_ref();
+;;         cell shard_state_proof = current_block_proof~load_ref();
+;;         cell lite_client_state_proof = current_block_proof~load_ref();
+;;         cell shard_proof = current_block_proof~load_maybe_ref();
+;;         cell lite_client_state = validate_state_proof(
+;;             mc_seqno,
+;;             block_proof,
+;;             shard_state_proof,
+;;             shard_proof,
+;;             lite_client_state_proof
+;;         );
+;;         cell lite_client_data = lite_client_state.begin_parse().load_ref_n(cs.slice_refs() - 1);
+;;         tuple lite_client_data_parsed = parse_lite_client_data(lite_client_data);
+;;         verify_block_signatures(signatures, lite_client_data_parsed.fifth(), hash, file_hash, lite_client_data_parsed.fourth());
+;;
+;;         ;;     ;; todo no query_id?
+;;         ;;     ;; check_transaction#91d555f7 transaction:^Cell proof:^Cell current_block:^Cell = InternalMsgBody;
+;;         ;;     slice tx_data = in_msg_body~load_ref().begin_parse();
+;;         ;;     (cell block, int hash) = extract_merkle_proof(in_msg_body~load_ref());
+;;         ;;     int tx_id = tx_data~load_uint(256);
+;;         ;;     int accout_block = tx_data~load_uint(256);
+;;         ;;     int tx_lt = tx_data~load_uint(64);
+;;         ;;     lookup_tx_in_block(block, tx_id, tx_lt, accout_block);
+;;         ;;     ;; todo check is master block
+;;         ;;     ;; load gen time and prev key block
+;;         ;;     ;; load tx
+;;         ;;
+;;             slice sender_address = cs~load_msg_addr();
+;;         ;;     ;; transaction_checked#756adff1 transaction:^Cell = InternalMsgBody;
+;;         send_response(response::transaction_checked, sender_address, query_id, begin_cell().end_cell());
+;;         return ();
+;;     }
+;;
+;;
+;;
+;;     throw(0xffff);
+;; }
+;;
+;; var get_state() method_id {
+;;     load_data();
+;;     return (
+;;         ctx_lite_client_addr,
+;;         ctx_lite_client_code,
+;;         ctx_maybe_lite_client_data
+;;     );
+;; }

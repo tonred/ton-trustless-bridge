@@ -1,0 +1,260 @@
+#include "imports/stdlib.fc";
+#include "imports/constants.fc";
+#include "imports/utils.fc";
+#include "imports/shared.fc";
+
+global int ctx_current_seq_no;           ;; sequence number of current key block
+global int ctx_current_epoch_since;      ;; starting timestamp of the current validator epoch
+global int ctx_current_epoch_until;      ;; ending timestamp of the current validator epoch
+global int ctx_current_cutoff_weight;    ;; minimum total validators weight needed for block confirmation.
+global cell ctx_current_validators_set;  ;; validators set with pubkey and weight, sorted by weight
+
+
+
+() load_data() impure inline {
+    (
+        ctx_current_seq_no,
+        ctx_current_epoch_since,
+        ctx_current_epoch_until,
+        ctx_current_cutoff_weight,
+        ctx_current_validators_set
+    ) = parse_lite_client_data(get_data()).untuple5();
+}
+
+() save_data() impure inline {
+    set_data(
+        begin_cell()
+            .store_uint(ctx_current_seq_no, 32)
+            .store_uint(ctx_current_epoch_since, 32)
+            .store_uint(ctx_current_epoch_until, 32)
+            .store_uint(ctx_current_cutoff_weight, 64)
+            .store_ref(ctx_current_validators_set)
+            .end_cell()
+    );
+}
+
+() send_response(int op, slice address, int query_id, int hash, cell callback) impure inline {
+    cell msg = begin_cell()
+        .store_msg_flags_and_address_none(NON_BOUNCEABLE)
+        .store_slice(address)
+        .store_coins(0)
+        .store_prefix_only_body()
+        .store_op(op)
+        .store_query_id(query_id)
+        .store_uint(hash, 256)
+        .store_maybe_ref(callback)
+        .end_cell();
+
+    send_raw_message(
+        msg,
+        SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+    );
+}
+
+;;; Parses basic block information from a provided `block_info` cell.
+;;; Returns:
+;;;  `is_key_block`    - -1 if it is a key block, 0 otherwise
+;;;  `seq_no`          - block sequence number
+;;;  `gen_utime`       - block generation time
+;;;  `prev_key_block`  - sequence number of the previous key block
+(int, int, int, int) parse_block_info(cell block_info) inline {
+    slice cs = block_info.begin_parse();
+    cs~skip_bits(70);
+    int is_key_block = cs~load_bool();
+    cs~skip_bits(9);
+    int seq_no = cs~load_uint(32);
+    cs~skip_bits(136);
+    int gen_utime = cs~load_uint(32);
+    cs~skip_bits(224);
+    int prev_key_block = cs~load_uint(32);
+
+    return (is_key_block, seq_no, gen_utime, prev_key_block);
+}
+
+;;; Extracts the current validators configuration (ConfigParam 34) from masterchain block.
+;;; Since McBlockExtra may vary in the number of references (depending on shard presence),
+;;; we extract the last reference from the dictionary as ConfigParam 34.
+(cell) parse_current_validators_set_from_block(slice block) inline {
+    slice mc_block_extra = block.load_ref_3().begin_parse().load_ref_3().begin_parse();
+
+    ;; Last reference is assumed to be config:ConfigParams.
+    return mc_block_extra.load_ref_n(mc_block_extra.slice_refs() - 1).udict_get_ref(32, 34);
+}
+
+;;; Parses validators configuration cell (ConfigParam 34) to extract:
+;;;  `utime_since`       - when this validator set became active
+;;;  `utime_until`       - when this validator set expires
+;;;  `main`              - number of main validators
+;;;  `validators_list`   - cell containing validator set
+(int, int, int, cell) parse_validators_config(cell config) inline {
+    slice cs = config.begin_parse().skip_bits(8);
+
+    int utime_since = cs~load_uint(32);
+    int utime_until = cs~load_uint(32);
+    cs~skip_bits(16);  ;; skip total validators count
+    int main = cs~load_uint(16);
+
+    cell validators_list = cs~load_ref();
+    return (utime_since, utime_until, main, validators_list);
+}
+
+;;; Builds a new validator set with each validator's public key and weight.
+;;; We do this because the original dictionary of validators contains pruned branches.
+;;; Returns the new dictionary plus the calculated `cutoff_weight` (2/3 + 1 of total weight).
+(cell, int) check_validators_list(int main_validators, cell validators_list) inline {
+    cell new_validators_list = new_dict();
+    int total_weight = 0;
+    int k = 0;
+    int key_len = 16;
+
+    repeat (main_validators) {
+        slice v = validators_list.udict_get(key_len, k);
+
+        ;; Skip tag (#53) and publickey tag (#8e81278a)
+        v~skip_bits(40);
+
+        ;; Next 256 bits is public key and next 64 bits is weight
+        total_weight += v.skip_bits(256).preload_uint(64);
+
+        ;; Add public key (256 bits) + weight (64 bits) to the new dictionary
+        (_) = new_validators_list~udict_add?(key_len, k, v.preload_bits(256 + 64));
+
+        k += 1;
+    }
+
+    int cutoff_weight = muldiv(total_weight, 2, 3) + 1;
+    return (new_validators_list, cutoff_weight);
+}
+
+;;; Processes a new key block:
+;;;  1. Extracts the block and check Merkle proof
+;;;  2. Parses the block header to retrieve key metadata (key block, sequence, etc.).
+;;;  3. Ensures that the block is valid (key block, and from a current epoch).
+;;;  4. Extracts the new validator configuration and verifies that the epoch transitions are valid.
+;;;  5. Calls signature verification to ensure the block is properly signed.
+;;;  6. Updates the contract's state with the new validator set and epoch information.
+;;; Returns the block `root_hash` if successful.
+int process_new_key_block(cell bridge_block, cell signatures) impure inline {
+    slice bridge_block_cs = bridge_block.begin_parse();
+    ;; Extract the inner block and its hash from the Merkle proof.
+    (cell block, int hash) = extract_merkle_proof(bridge_block_cs.preload_ref());
+    int file_hash = bridge_block_cs~load_uint(256);
+    slice block_cs = block.begin_parse();
+    cell block_info = block_cs.preload_ref();
+
+    var (is_key_block, seq_no, gen_utime, prev_key_block) = parse_block_info(block_info);
+
+    ;; Basic checks to ensure we are processing the correct block type:
+    ;; - Must be a key block.
+    ;; - Its generation time must be at or after the current epoch start.
+    throw_unless(error::not_key_block, is_key_block);
+    throw_unless(error::key_block_from_old_epoch, gen_utime >= ctx_current_epoch_since);
+
+    ;; Extract the new validator configuration from master block.
+    cell new_validators = parse_current_validators_set_from_block(block_cs);
+    var (next_utime_since, next_utime_until, next_main, next_validators_list) = parse_validators_config(new_validators);
+
+    ;; Validate the epoch transition:
+    ;; - The new block should reference the current block as its previous key block.
+    ;; OR
+    ;; - The new epoch should start exactly when the current epoch ends.
+    throw_unless(
+        error::invalid_epoch,
+        (prev_key_block == ctx_current_seq_no) | (ctx_current_epoch_until == next_utime_since)
+    );
+
+    ;; Verify the block signatures using the current validators set.
+    verify_block_signatures(
+        signatures,
+        ctx_current_validators_set,
+        hash,
+        file_hash,
+        ctx_current_cutoff_weight
+    );
+
+    ;; Rebuild the validator set based on the new configuration and calculate the new cutoff weight.
+    (cell new_validators_list, int new_cutoff_weight) = check_validators_list(next_main, next_validators_list);
+
+    ;; Update contract state
+    ctx_current_seq_no = seq_no;
+    ctx_current_epoch_since = next_utime_since;
+    ctx_current_epoch_until = next_utime_until;
+    ctx_current_cutoff_weight = new_cutoff_weight;
+    ctx_current_validators_set = new_validators_list;
+
+    return hash;
+}
+
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        ;; ignore all empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_msg_flags();
+
+    if (flags & 1) {
+        ;; ignore all bounced messages
+        return ();
+    }
+
+    load_data();
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == op::new_key_block) {
+        cell bridge_block = in_msg_body~load_ref();
+        cell signatures = in_msg_body~load_ref();
+
+        ;; verifying new key block, updating state and get its hash.
+        int hash = process_new_key_block(bridge_block, signatures);
+
+        save_data();
+
+        slice sender_address = cs~load_msg_addr();
+        send_response(response::ok, sender_address, query_id, hash, null());
+
+        return ();
+    }
+
+
+    if (op == op::check_block) {
+        slice bridge_block_cs = in_msg_body~load_ref().begin_parse();
+        int file_hash = bridge_block_cs~load_uint(256);
+        int root_hash = bridge_block_cs~load_uint(256);
+
+        cell signatures = in_msg_body~load_ref();
+
+        verify_block_signatures(
+            signatures,
+            ctx_current_validators_set,
+            root_hash,
+            file_hash,
+            ctx_current_cutoff_weight
+        );
+
+        slice sender_address = cs~load_msg_addr();
+        cell callback = in_msg_body~load_maybe_ref();
+        send_response(response::correct, sender_address, query_id, root_hash, callback);
+
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+
+
+var get_state() method_id {
+    load_data();
+    return (
+        ctx_current_seq_no,
+        ctx_current_epoch_since,
+        ctx_current_epoch_until,
+        ctx_current_cutoff_weight,
+        ctx_current_validators_set
+    );
+}

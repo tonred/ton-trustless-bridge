@@ -1,0 +1,126 @@
+#include "imports/constants.fc";
+#include "imports/stdlib.fc";
+#include "imports/utils.fc";
+#include "imports/dict.fc";
+#include "imports/shared.fc";
+#include "imports/transaction_checker_shared.fc";
+
+global slice ctx_lite_client_addr;
+
+
+() load_data() impure inline {
+    var ds = get_data().begin_parse();
+
+    ctx_lite_client_addr = ds~load_msg_addr();
+}
+
+() save_data() impure inline {
+    set_data(
+        begin_cell()
+            .store_slice(ctx_lite_client_addr)
+            .end_cell()
+    );
+}
+
+
+() query_lite_client(int query_id, cell block, cell signatures, cell callback) impure inline {
+    cell msg = begin_cell()
+        .store_msg_flags_and_address_none(NON_BOUNCEABLE)
+        .store_slice(ctx_lite_client_addr)
+        .store_coins(0)
+        .store_prefix_only_body()
+        .store_op(op::check_block)
+        .store_query_id(query_id)
+        .store_ref(block)
+        .store_ref(signatures)
+        .store_maybe_ref(callback)
+        .end_cell();
+
+    send_raw_message(
+        msg,
+        SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+    );
+}
+
+
+() send_response(int op, slice address, int query_id, cell transaction) impure inline {
+    cell msg = begin_cell()
+        .store_msg_flags_and_address_none(NON_BOUNCEABLE)
+        .store_slice(address)
+        .store_coins(0)
+        .store_prefix_only_body()
+        .store_op(op)
+        .store_query_id(query_id)
+        .store_ref(transaction)
+        .end_cell();
+
+    send_raw_message(
+        msg,
+        SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+    );
+}
+
+
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        ;; ignore all empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_msg_flags();
+
+    if (flags & 1) {
+        ;; ignore all bounced messages
+        return ();
+    }
+
+    load_data();
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == op::check_transaction) {
+        slice tx_data = in_msg_body~load_ref().begin_parse();
+        slice proof = in_msg_body~load_ref().begin_parse();
+        ;; cell current_block = in_msg_body~load_ref(); ;; not used here
+
+        cell signatures = proof~load_ref();
+        cell block_proof = proof~load_ref();
+        (cell block, int hash) = extract_merkle_proof(block_proof);
+
+        cell tx_proof = tx_data~load_ref();
+        (_, int tx_hash) = extract_merkle_proof(tx_proof);
+        int account_block = tx_data~load_uint(256);
+        int tx_lt = tx_data~load_uint(64);
+        lookup_tx_in_block(block, tx_hash, tx_lt, account_block);
+        slice block_cs = block.begin_parse();
+        cell block_info = block_cs.preload_ref();
+        check_is_block_mc(block_info);
+
+        slice sender_address = cs~load_msg_addr();
+
+        ;; call LiteClient to verify block signatures
+        cell callback = begin_cell().store_slice(sender_address).store_ref(tx_proof).end_cell();
+        cell block_hashes = begin_cell()
+            .store_uint(proof.preload_uint(256), 256)
+            .store_uint(hash, 256)
+            .end_cell();
+        query_lite_client(query_id, block_hashes, signatures, callback);
+
+        return ();
+    }
+    if (op == response::correct) {
+        throw_unless(error::not_lite_client, equal_slices_bits(cs~load_msg_addr(), ctx_lite_client_addr));
+        slice callback_data = in_msg_body~load_ref().begin_parse();
+        slice sender_address = callback_data~load_msg_addr();
+        cell transaction = callback_data~load_ref();
+        send_response(response::transaction_checked, sender_address, query_id, transaction);
+        return ();
+    }
+
+
+
+    throw(0xffff);
+}

@@ -1,0 +1,9 @@
+#include "stdlib.fc";
+#include "constants.fc";
+
+() check_is_block_mc(cell block_info) impure inline {
+    slice cs = block_info.begin_parse();
+    cs~skip_bits(64);
+    int is_not_master = cs~load_bool();
+    throw_if(error::block_is_not_mc, is_not_master);
+}

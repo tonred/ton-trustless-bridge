@@ -1,0 +1,41 @@
+const int error::not_exotic                = 101;
+const int error::not_merkle_proof          = 102;
+const int error::not_merkle_update         = 103;
+
+;;; LiteClient
+const int error::not_key_block             = 111;
+const int error::key_block_from_same_epoch = 112;
+const int error::key_block_from_old_epoch  = 113;
+const int error::invalid_signature         = 114;
+const int error::not_enough_signatures     = 115;
+const int error::invalid_epoch             = 116;
+
+;;; TransactionChecker
+const int error::tx_not_found_in_block     = 200;
+const int error::invalid_tx_hash           = 201;
+const int error::block_is_not_mc           = 202;
+const int error::not_lite_client           = 203;
+
+;;; TransactionCheckerContactless
+const int error::mc_block_is_too_old        = 300;
+const int error::invalid_mc_block_root_hash = 301;
+const int error::invalid_account_state_hash = 302;
+const int error::invalid_shard_state_hash   = 303;
+
+
+;;; LiteClient
+const op::new_key_block = 0x11a78ffe;
+
+const op::check_block   = 0x8eaa9d76;
+const response::ok      = 0xff8ff4e1;
+const response::correct = 0xce02b807;
+
+;;; TransactionChecker
+const op::check_transaction         = 0x91d555f7;
+const response::transaction_checked = 0x756adff1;
+
+
+
+
+const int cell_type::merkle_proof = 3;
+const int cell_type::merkle_update = 4;
