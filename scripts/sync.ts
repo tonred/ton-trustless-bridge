@@ -30,6 +30,7 @@ async function sendNewKeyBlock(
     liteClient: OpenedContract<LiteClient>,
     newSeqno: number,
 ) {
+    console.log(`Found a new key block ${newSeqno}`);
     let state = await liteClient.getState();
     const mcInfo = await client.liteClient.getMasterchainInfo();
     const keyBlockFullId = await client.httpClient.lookUpBlock(mcInfo.last.workchain, mcInfo.last.shard, newSeqno);
@@ -47,7 +48,7 @@ async function sendNewKeyBlock(
     }
     const signatures = await client.httpClient.getMasterchainBlockSignatures(newSeqno);
     await liteClient.sendNewKeyBlock(provider.sender(), {
-        value: toNano('0.05'),
+        value: liteClient.address.workChain == 0 ? toNano('0.05') : toNano('1'),
         block: {
             fileHash: nextKeyBlockFileHash,
             blockProof: prepareKeyBlock(nextKeyBlock),
@@ -84,7 +85,6 @@ async function syncNewBlock(
             console.log('May be RPC error or wrong network');
             return false;
         } else {
-            console.log(`Found a new key block ${lastKeySeqno}, sending it to LiteClient`);
             await sendNewKeyBlock(provider, client, liteClient, lastKeySeqno);
         }
         if (waitForNew) {
