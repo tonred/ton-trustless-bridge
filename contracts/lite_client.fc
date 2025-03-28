@@ -3,44 +3,51 @@
 #include "imports/utils.fc";
 #include "imports/shared.fc";
 
-global int ctx_current_seq_no;           ;; sequence number of current key block
-global int ctx_current_epoch_since;      ;; starting timestamp of the current validator epoch
-global int ctx_current_epoch_until;      ;; ending timestamp of the current validator epoch
-global int ctx_current_cutoff_weight;    ;; minimum total validators weight needed for block confirmation.
-global cell ctx_current_validators_set;  ;; validators set with pubkey and weight, sorted by weight
-
+global int ctx_current_epoch_since;  ;; starting timestamp of the current validator epoch
+global cell ctx_past_epochs;         ;; past epochs dictionary, key=epoch_scince:uint32 value=epoch_data_hash:uint256
+global int ctx_epochs_counter;       ;; past epochs dictionary item counter
 
 
 () load_data() impure inline {
-    (
-        ctx_current_seq_no,
-        ctx_current_epoch_since,
-        ctx_current_epoch_until,
-        ctx_current_cutoff_weight,
-        ctx_current_validators_set
-    ) = parse_lite_client_data(get_data()).untuple5();
+    slice cs = get_data().begin_parse();
+    ctx_current_epoch_since = cs~load_uint(32);
+    ctx_epochs_counter = cs~load_uint(16);
+    ctx_past_epochs = cs~load_ref();
 }
 
 () save_data() impure inline {
     set_data(
         begin_cell()
-            .store_uint(ctx_current_seq_no, 32)
             .store_uint(ctx_current_epoch_since, 32)
-            .store_uint(ctx_current_epoch_until, 32)
-            .store_uint(ctx_current_cutoff_weight, 64)
-            .store_ref(ctx_current_validators_set)
+            .store_uint(ctx_epochs_counter, 16)
+            .store_ref(ctx_past_epochs)
             .end_cell()
     );
 }
 
-() send_response(int op, slice address, int query_id, int hash, cell callback) impure inline {
+() set_new_epoch_data(int epoch_id, cell data) impure inline {
+    if (ctx_epochs_counter >= lite_client::max_past_epochs) {
+        var (_, _, _) = ctx_past_epochs~udict::delete_get_min(32);
+    } else {
+        ctx_epochs_counter += 1;
+    }
+    ctx_past_epochs~udict_set_ref(32, epoch_id, data);
+}
+
+;;; lookup epoch data hash in past epochs by id
+;;; `epoch_id` - epoch utime scince
+cell load_epoch_data_by_id(int epoch_id) inline {
+    var (epoch_data, _) = ctx_past_epochs.udict_get_ref?(32, epoch_id);
+    return epoch_data;
+}
+
+() send_response(int op, slice address, int hash, cell callback) impure inline {
     cell msg = begin_cell()
         .store_msg_flags_and_address_none(NON_BOUNCEABLE)
         .store_slice(address)
         .store_coins(0)
         .store_prefix_only_body()
         .store_op(op)
-        .store_query_id(query_id)
         .store_uint(hash, 256)
         .store_maybe_ref(callback)
         .end_cell();
@@ -51,11 +58,13 @@ global cell ctx_current_validators_set;  ;; validators set with pubkey and weigh
     );
 }
 
+
 ;;; Parses basic block information from a provided `block_info` cell.
 ;;; Returns:
 ;;;  `is_key_block`    - -1 if it is a key block, 0 otherwise
 ;;;  `seq_no`          - block sequence number
 ;;;  `gen_utime`       - block generation time
+;;;  `vset_hash`       - block validators set hash
 ;;;  `prev_key_block`  - sequence number of the previous key block
 (int, int, int, int) parse_block_info(cell block_info) inline {
     slice cs = block_info.begin_parse();
@@ -71,14 +80,48 @@ global cell ctx_current_validators_set;  ;; validators set with pubkey and weigh
     return (is_key_block, seq_no, gen_utime, prev_key_block);
 }
 
-;;; Extracts the current validators configuration (ConfigParam 34) from masterchain block.
+;;; Parses basic block information from a provided `block_info` cell.
+;;; Returns:
+;;;  `is_key_block`    - -1 if it is a key block, 0 otherwise
+;;;  `seq_no`          - block sequence number
+;;;  `gen_utime`       - block generation time
+;;;  `vset_hash`       - block validators set hash
+;;;  `prev_key_block`  - sequence number of the previous key block
+(int, int, int, int) parse_tycho_block_info(cell block_info) inline {
+    slice cs = block_info.begin_parse();
+    cs~skip_bits(70);
+    int is_key_block = cs~load_bool();
+    cs~skip_bits(9);
+    int seq_no = cs~load_uint(32);
+    cs~skip_bits(136);
+    int gen_utime = cs~load_uint(32);
+    cs~skip_bits(240); ;; tycho has extra 16 bit for gen_utime_ms
+    int prev_key_block = cs~load_uint(32);
+
+    return (is_key_block, seq_no, gen_utime, prev_key_block);
+}
+
+
+
+;;; Extracts ConfigParam by id from masterchain block.
 ;;; Since McBlockExtra may vary in the number of references (depending on shard presence),
-;;; we extract the last reference from the dictionary as ConfigParam 34.
-(cell) parse_current_validators_set_from_block(slice block) inline {
+;;; we extract the last reference from the dictionary as ConfigParams.
+(cell) load_config_param_from_block(slice block, int param_id) inline {
     slice mc_block_extra = block.load_ref_3().begin_parse().load_ref_3().begin_parse();
 
     ;; Last reference is assumed to be config:ConfigParams.
-    return mc_block_extra.load_ref_n(mc_block_extra.slice_refs() - 1).udict_get_ref(32, 34);
+    return mc_block_extra.load_ref_n(mc_block_extra.slice_refs() - 1).udict_get_ref(32, param_id);
+}
+
+;;; Extracts the current validators configuration (ConfigParam 34) from masterchain block.
+(cell) parse_current_validators_set_from_block(slice block) inline {
+    return load_config_param_from_block(block, 34);
+
+}
+
+;;; Extracts the previous validators configuration (ConfigParam 32) from masterchain block.
+(cell) parse_prev_validators_set_from_block(slice block) inline {
+    return load_config_param_from_block(block, 32);
 }
 
 ;;; Parses validators configuration cell (ConfigParam 34) to extract:
@@ -142,7 +185,7 @@ int process_new_key_block(cell bridge_block, cell signatures) impure inline {
     slice block_cs = block.begin_parse();
     cell block_info = block_cs.preload_ref();
 
-    var (is_key_block, seq_no, gen_utime, prev_key_block) = parse_block_info(block_info);
+    var (is_key_block, seq_no, gen_utime, prev_key_block) = parse_tycho_block_info(block_info);
 
     ;; Basic checks to ensure we are processing the correct block type:
     ;; - Must be a key block.
@@ -154,33 +197,57 @@ int process_new_key_block(cell bridge_block, cell signatures) impure inline {
     cell new_validators = parse_current_validators_set_from_block(block_cs);
     var (next_utime_since, next_utime_until, next_main, next_validators_list) = parse_validators_config(new_validators);
 
+    cell current_epoch_data = load_epoch_data_by_id(ctx_current_epoch_since);
+    var (
+        _, ;; current_epoch_since,
+        current_epoch_until,
+        _, ;; current_main_validators,
+        current_cutoff_weight,
+        current_validators_set
+    ) = parse_epoch_data(current_epoch_data);
+
     ;; Validate the epoch transition:
-    ;; - The new block should reference the current block as its previous key block.
-    ;; OR
     ;; - The new epoch should start exactly when the current epoch ends.
-    throw_unless(
-        error::invalid_epoch,
-        (prev_key_block == ctx_current_seq_no) | (ctx_current_epoch_until == next_utime_since)
-    );
+    ;; OR
+    ;; - The new key block should reference the previous epoch as current saved
+    ;;   (new config param 32 should match current epoch).
+    if (current_epoch_until != next_utime_since) {
+        ;; Extract the prev validator configuration (32) from master block.
+        cell prev_epoch_from_new_block = parse_prev_validators_set_from_block(block_cs);
+        var (new_block_prev_epoch_id, _, _, _) = parse_validators_config(prev_epoch_from_new_block);
+        throw_unless(error::invalid_epoch, (new_block_prev_epoch_id == ctx_current_epoch_since));
+    }
 
     ;; Verify the block signatures using the current validators set.
     verify_block_signatures(
         signatures,
-        ctx_current_validators_set,
+        current_validators_set,
         hash,
         file_hash,
-        ctx_current_cutoff_weight
+        current_cutoff_weight
     );
 
     ;; Rebuild the validator set based on the new configuration and calculate the new cutoff weight.
     (cell new_validators_list, int new_cutoff_weight) = check_validators_list(next_main, next_validators_list);
+    cell new_epoch_data = store_epoch_data(
+        next_utime_since,
+        next_utime_until,
+        next_main,
+        new_cutoff_weight,
+        new_validators_list
+    );
+
+
+    int epoch_data_hash = new_epoch_data.cell_hash();
+    cell epoch_data_lib_ref = create_lib_ref(epoch_data_hash);
+
+    ;; Сheck that the library exists
+    slice lib = epoch_data_lib_ref.begin_parse();
+    throw_if(error::epoch_lib_not_set, slice_data_empty?(lib));
 
     ;; Update contract state
-    ctx_current_seq_no = seq_no;
     ctx_current_epoch_since = next_utime_since;
-    ctx_current_epoch_until = next_utime_until;
-    ctx_current_cutoff_weight = new_cutoff_weight;
-    ctx_current_validators_set = new_validators_list;
+    set_new_epoch_data(next_utime_since, epoch_data_lib_ref);
 
     return hash;
 }
@@ -203,7 +270,6 @@ int process_new_key_block(cell bridge_block, cell signatures) impure inline {
     load_data();
 
     int op = in_msg_body~load_uint(32);
-    int query_id = in_msg_body~load_uint(64);
 
     if (op == op::new_key_block) {
         cell bridge_block = in_msg_body~load_ref();
@@ -215,31 +281,34 @@ int process_new_key_block(cell bridge_block, cell signatures) impure inline {
         save_data();
 
         slice sender_address = cs~load_msg_addr();
-        send_response(response::ok, sender_address, query_id, hash, null());
+        send_response(response::ok, sender_address, hash, null());
 
         return ();
     }
 
 
-    if (op == op::check_block) {
-        slice bridge_block_cs = in_msg_body~load_ref().begin_parse();
-        int file_hash = bridge_block_cs~load_uint(256);
-        int root_hash = bridge_block_cs~load_uint(256);
-
-        cell signatures = in_msg_body~load_ref();
-
-        verify_block_signatures(
-            signatures,
-            ctx_current_validators_set,
-            root_hash,
-            file_hash,
-            ctx_current_cutoff_weight
-        );
+    if (op == op::get_epoch_data) {
+        int epoch_id = in_msg_body~load_uint(32);
+        cell epoch_data = load_epoch_data_by_id(epoch_id);
 
         slice sender_address = cs~load_msg_addr();
         cell callback = in_msg_body~load_maybe_ref();
-        send_response(response::correct, sender_address, query_id, root_hash, callback);
 
+        cell msg = begin_cell()
+            .store_msg_flags_and_address_none(NON_BOUNCEABLE)
+            .store_slice(sender_address)
+            .store_coins(0)
+            .store_prefix_only_body()
+            .store_op(response::epoch_data)
+            .store_uint(epoch_id, 32)
+            .store_maybe_ref(epoch_data)
+            .store_maybe_ref(callback)
+            .end_cell();
+
+        send_raw_message(
+            msg,
+            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        );
         return ();
     }
 
@@ -251,10 +320,30 @@ int process_new_key_block(cell bridge_block, cell signatures) impure inline {
 var get_state() method_id {
     load_data();
     return (
-        ctx_current_seq_no,
         ctx_current_epoch_since,
-        ctx_current_epoch_until,
-        ctx_current_cutoff_weight,
-        ctx_current_validators_set
+        ctx_past_epochs,
+        load_epoch_data_by_id(ctx_current_epoch_since)
     );
 }
+
+var get_state_short() method_id {
+    load_data();
+    return (
+        ctx_current_epoch_since,
+        ctx_past_epochs
+    );
+}
+
+
+;; var calc_epoch_data(cell block) method_id {
+;;     cell new_validators = parse_current_validators_set_from_block(block.begin_parse());
+;;     var (next_utime_since, next_utime_until, next_main, next_validators_list) = parse_validators_config(new_validators);
+;;     (cell new_validators_list, int new_cutoff_weight) = check_validators_list(next_main, next_validators_list);
+;;     return store_epoch_data(
+;;         next_utime_since,
+;;         next_utime_until,
+;;         next_main,
+;;         new_cutoff_weight,
+;;         new_validators_list
+;;     );
+;; }

@@ -1,40 +1,39 @@
 ///
 /// LiteClient
 ///
-new_key_block#11a78ffe query_id:uint64
-    block:^BridgeBlock signatures:^(HashmapE 16 SignatureDescr)
-    = InternalMsgBody;
-ok#ff8ff4e1 query_id:uint64 block_hash:uint256 = InternalMsgBody;
+new_key_block#11a78ffe block:^BridgeBlock
+    signatures:^(HashmapE 16 SignatureDescr) = InternalMsgBody;
+ok#ff8ff4e1 block_hash:uint256 = InternalMsgBody;
 
-
-check_block#8eaa9d76 query_id:uint64
-    block:^BridgeBlockShort signatures:^(HashmapE 16 SignatureDescr)
+get_epoch_data#bf1ddde8 epoch_utime_since:uint32
     callback:(Maybe ^Cell) = InternalMsgBody;
-correct#ce02b807 query_id:uint64 block_hash:uint256 = InternalMsgBody;
 
-get_state#8eaa9d76 query_id:uint64
+epoch_data#f60fba1d epoch_data_hash:uint256
     callback:(Maybe ^Cell) = InternalMsgBody;
-state#ce02b807 query_id:uint64
-    state:^LiteClientState callback:(Maybe ^Cell)
-    = InternalMsgBody;
 
 
 /// TransactionChecker
-check_transaction#91d555f7 transaction:^Cell
-    proof:^Cell current_block:^Cell = InternalMsgBody;
-transaction_checked#756adff1 transaction:^Cell = InternalMsgBody;
+check_transaction#ddab5b88 proof_chain:^(MERKLE_PROOF ProofChainRoot) tx_proof:^TransactionProof = InternalMsgBody;
+tx_proof#_ account_block:uint256 lt:uint64 tx_hash:uint256 = TransactionProof;
+transaction_checked#756adff1 valid:Bool tx_hash:uint256 = InternalMsgBody;
 
-/// TransactionContactless
-check_transaction#91d555f7 transaction:^Cell
-    proof:^Cell current_block:^Cell = InternalMsgBody;
-transaction_checked#756adff1 transaction:^Cell = InternalMsgBody;
+sync_epoch#5323f31d epoch_id:uint32 = InternalMsgBody;
 
 
+proof_chain_root#_ {n:#}
+  file_hash:uint256 vset_utime_since:uint32
+  mc_block:^Cell mc_signatures:^(Hashmap 16 bits512) head:(ProofChainHead ~n) = ProofChainRoot;
 
-lite_client_state#_ seq_no:uint32
-    epoch_since:uint32 epoch_until:uint32
-    cutoff_weight:uint64 epoch_until:uint32
-    validators_set:^(HashmapE 16 ValidatorDescrShort) = LiteClientState;
+proof_chain_head_empty#_ = ProofChainHead ~0;
+proof_chain_head_1#_ sc_block1:^Cell = ProofChainHead ~1;
+proof_chain_head_2#_ {n:#} sc_block1:^Cell tail:^(ProofChainTail ~n) = ProofChainHead ~2;
+
+proof_chain_tail_empty#_ = ProofChainTail ~0;
+proof_chain_tail_1#_ sc_block1:^Cell = ProofChainTail ~1;
+proof_chain_tail_2#_ sc_block1:^Cell sc_block2:^Cell = ProofChainTail ~2;
+proof_chain_tail_3#_ sc_block1:^Cell sc_block2:^Cell sc_block3:^Cell = ProofChainTail ~3;
+proof_chain_tail_3tail#_ {n:#} sc_block1:^Cell sc_block2:^Cell sc_block3:^Cell tail:^(ProofChainTail ~n) = ProofChainTail ~4;
+
 
 bridge_block#_ file_hash:uint256 block_proof:^(MERKLE_PROOF Block) = BridgeBlock;
 bridge_block_short#_ file_hash:uint256 root_hash:uint256 = BridgeBlockShort;
@@ -48,6 +47,8 @@ validator#_ public_key:bits256 weight:uint64 = ValidatorDescrShort;
 
 /// std
 bit$_ (## 1) = Bit;
+bool_false$0 = Bool;
+bool_true$1 = Bool;
 
 nothing$0 {X:Type} = Maybe X;
 just$1 {X:Type} value:X = Maybe X;

@@ -9,33 +9,34 @@ const int error::key_block_from_old_epoch  = 113;
 const int error::invalid_signature         = 114;
 const int error::not_enough_signatures     = 115;
 const int error::invalid_epoch             = 116;
+const int error::epoch_lib_not_set         = 117;
 
 ;;; TransactionChecker
 const int error::tx_not_found_in_block     = 200;
 const int error::invalid_tx_hash           = 201;
-const int error::block_is_not_mc           = 202;
-const int error::not_lite_client           = 203;
+const int error::not_lite_client           = 202;
+const int error::sc_block_not_in_mc_state  = 203;
+const int error::invalid_sc_proof          = 204;
 
-;;; TransactionCheckerContactless
-const int error::mc_block_is_too_old        = 300;
-const int error::invalid_mc_block_root_hash = 301;
-const int error::invalid_account_state_hash = 302;
-const int error::invalid_shard_state_hash   = 303;
-
+;;; LibStore
+const int error::not_owner = 400;
 
 ;;; LiteClient
-const op::new_key_block = 0x11a78ffe;
+const op::new_key_block  = 0x11a78ffe;
+const op::get_epoch_data = 0xbf1ddde8;
 
-const op::check_block   = 0x8eaa9d76;
-const response::ok      = 0xff8ff4e1;
-const response::correct = 0xce02b807;
+const response::ok         = 0xff8ff4e1;
+const response::epoch_data = 0xf60fba1d;
 
 ;;; TransactionChecker
-const op::check_transaction         = 0x91d555f7;
+const op::check_transaction         = 0xddab5b88;
+const op::sync_epoch                = 0x5323f31d;
 const response::transaction_checked = 0x756adff1;
 
+const int cell_type::library_reference = 2;
+const int cell_type::merkle_proof      = 3;
+const int cell_type::merkle_update     = 4;
 
 
-
-const int cell_type::merkle_proof = 3;
-const int cell_type::merkle_update = 4;
+const int lite_client::max_past_epochs = 10;
+const int tx_checker::max_past_epochs  = 10;

@@ -16,12 +16,11 @@
 
     int weight = 0;
     int key = 0;
-    ;; todo if more than 10 signatures to check then run child vm to check signatures with +128 flag
     do {
-        (key, slice signature, int stopFlag) = signatures.udict_get_nexteq?(16, key);
+        (key, slice signature, int stop_flag) = signatures.udict_get_nexteq?(16, key);
 
         ;; If no more signatures are available, but we haven't reached cutoff weight, throw an error
-        throw_unless(error::not_enough_signatures, stopFlag);
+        throw_unless(error::not_enough_signatures, stop_flag);
 
         ;; Retrieve validator data (public key + weight)
         slice data = validators.udict_get(16, key);
@@ -30,7 +29,8 @@
         ;; Check signature validity
         throw_unless(
             error::invalid_signature,
-            check_data_signature(hash, signature, pubkey)
+            check_data_signature_raw(hash, signature, pubkey)
+            ;; check_data_signature(hash, signature, pubkey)
         );
 
         weight += data.preload_uint(64);
@@ -40,27 +40,48 @@
 }
 
 
-
-;;; Loads LiteClient data
-;;; returns tuple with 5 elements:
-;;; 1. `current_seq_no`         - sequence number of current key block
-;;; 2. `current_epoch_since`    - starting timestamp of the current validator epoch
-;;; 3. `current_epoch_until`    - ending timestamp of the current validator epoch
-;;; 4. `current_cutoff_weight`  - minimum total validators weight needed for block confirmation.
-;;; 5. `current_validators_set` - validators set with pubkey and weight, sorted by weight
-tuple parse_lite_client_data(cell data) impure inline {
+;;; Loads epoch data
+;;; returns:
+;;; `epoch_since`:uint32       - starting timestamp of the validator epoch
+;;; `epoch_until`:uint32       - ending timestamp of the validator epoch
+;;; `main_validators`:uint16   - number of validators for masterchain in epoch.
+;;; `cutoff_weight`:grams      - minimum total validators weight needed for block ation.
+;;; `validators_set`:cell      - validators set with pubkey and weight, sorted by weight
+var parse_epoch_data(cell data) impure inline {
     slice cs = data.begin_parse();
-    int current_seq_no = cs~load_uint(32);
-    int current_epoch_since = cs~load_uint(32);
-    int current_epoch_until = cs~load_uint(32);
-    int current_cutoff_weight = cs~load_uint(64);
-    cell current_validators_set = cs~load_ref();
+    int epoch_since = cs~load_uint(32);
+    int epoch_until = cs~load_uint(32);
+    int main_validators = cs~load_uint(16);
+    int cutoff_weight = cs~load_grams();
+    cell validators_set = cs~load_ref();
 
-    return tuple5(current_seq_no, current_epoch_since, current_epoch_until, current_cutoff_weight, current_validators_set);
+    return (
+        epoch_since,
+        epoch_until,
+        main_validators,
+        cutoff_weight,
+        validators_set
+    );
 }
 
+;;; store epoch data into cell
+cell store_epoch_data(
+    int epoch_since,
+    int epoch_until,
+    int main_validators,
+    int cutoff_weight,
+    cell validators_set
+) impure inline {
+    builder b = begin_cell()
+        .store_uint(epoch_since, 32)
+        .store_uint(epoch_until, 32)
+        .store_uint(main_validators, 16)
+        .store_grams(cutoff_weight)
+        .store_ref(validators_set);
+    return b.end_cell();
+}
 
-() lookup_tx_in_block(cell block, int tx_id, int lt, int account_block_id) impure inline {
+() tx_checker::lookup_tx_in_block(cell block, int tx_id, int lt, slice account_block_id) impure inline {
     cell account_blocks = block.begin_parse()
         .load_ref_3()
         .begin_parse()
@@ -70,7 +91,7 @@ tuple parse_lite_client_data(cell data) impure inline {
 
     (slice account_block, _) = account_blocks
         .begin_parse()
-        .aug_dict_get(begin_cell().store_uint(account_block_id, 256).end_cell().begin_parse());
+        .aug_dict_get(account_block_id);
     account_block~skip_currency_collection();
     account_block~skip_bits(4 + 256);
     (slice tx, int found) = account_block.aug_dict_get(begin_cell().store_uint(lt, 64).end_cell().begin_parse());

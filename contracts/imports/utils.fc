@@ -1,10 +1,10 @@
 #include "stdlib.fc";
 #include "constants.fc";
 
+cell end_cell_exotic(builder b) asm "ONE ENDXC";
 
-forall X, Y, Z, W, V -> tuple tuple5(X x, Y y, Z z, W w, V v) asm "5 TUPLE";
-forall X, Y, Z, W, V -> (X, Y, Z, W, V) untuple5(tuple t) asm "5 UNTUPLE";
-forall X -> X fifth(tuple t) asm "4 INDEX";
+int check_signature_raw(int hash, slice signature, int public_key) asm "x{F916} @Defop CHKSIGNURAW CHKSIGNURAW";
+int check_data_signature_raw(slice data, slice signature, int public_key) asm "x{F917} @Defop CHKSIGNSRAW CHKSIGNSRAW";
 
 (slice, int) begin_parse_exotic(cell x) asm "XCTOS";
 cell load_ref_1(slice s) asm "1 PLDREFIDX";
@@ -32,20 +32,15 @@ builder store_same(builder b, int n, int x) inline asm "STSAME";
     return (s~load_ref(), s~load_uint(256));
 }
 
-;;; returns `old_hash`, `new_hash`
-(int, int) extract_merkle_update(cell update) impure inline_ref {
-    (slice s, int is_exotic) = update.begin_parse_exotic();
-    throw_unless(error::not_exotic, is_exotic);
-
-    int ty = s~load_uint(8);
-    throw_unless(error::not_merkle_update, ty == cell_type::merkle_update);
-
-    return (s~load_uint(256), s~load_uint(256));
-}
-
-
 (slice, ()) skip_currency_collection(slice cs) impure inline {
     cs~load_grams();
     cs~load_dict();
     return (cs, ());
+}
+
+cell create_lib_ref(int hash) inline {
+    return begin_cell()
+        .store_uint(cell_type::library_reference, 8)
+        .store_uint(hash, 256)
+        .end_cell_exotic();
 }

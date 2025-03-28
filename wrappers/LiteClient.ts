@@ -1,41 +1,35 @@
-import { Address, beginCell, Cell, Contract, contractAddress, ContractProvider, Sender, SendMode } from '@ton/core';
+import {
+    Address,
+    beginCell,
+    Cell,
+    Contract,
+    contractAddress,
+    ContractProvider,
+    Dictionary,
+    Sender,
+    SendMode,
+} from '@ton/core';
 
 export type LiteClientConfig = {
-    currentSeqno: number;
-    currentEpochSince: number;
-    currentEpochUntil: number;
-    currentCutoffWeight: bigint;
-    currentValidatorsList: Cell;
+    currentEpochId: number;
+    pastEpochs: Dictionary<number, Cell>;
+    pastEpochsCounter?: number;
+
     id?: number;
 };
 
 export function liteClientConfigToCell(config: LiteClientConfig): Cell {
     return beginCell()
-        .storeUint(config.currentSeqno, 32)
-        .storeUint(config.currentEpochSince, 32)
-        .storeUint(config.currentEpochUntil, 32)
-        .storeUint(config.currentCutoffWeight, 64)
+        .storeUint(config.currentEpochId, 32)
+        .storeUint(config.pastEpochsCounter ?? 1, 16)
         .storeUint(config.id ?? 0, 32)
-        .storeRef(config.currentValidatorsList)
+        .storeDict(config.pastEpochs)
         .endCell();
 }
 
 export const Opcodes = {
     newKeyBlock: 0x11a78ffe,
-    checkBlock: 0x8eaa9d76,
     ok: 0xff8ff4e1,
-    correct: 0xce02b807,
-};
-
-export const ErrorCodes = {
-    notExotic: 101,
-    notMerkleProof: 102,
-    notKeyBlock: 111,
-    keyBlockFromSameEpoch: 112,
-    keyBlockFromOldEpoch: 113,
-    invalidBlockSignature: 114,
-    notEnoughSignatures: 115,
-    invalidEpoch: 116,
 };
 
 export class LiteClient implements Contract {
@@ -75,7 +69,7 @@ export class LiteClient implements Contract {
             queryID?: number;
         },
     ) {
-        provider.getState();
+        console.log(opts);
         await provider.internal(via, {
             value: opts.value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
@@ -88,35 +82,6 @@ export class LiteClient implements Contract {
         });
     }
 
-    async sendCheckBlock(
-        provider: ContractProvider,
-        via: Sender,
-        opts: {
-            value: string | bigint;
-            block: {
-                fileHash: Buffer;
-                rootHash: Buffer;
-            };
-            signatures: Cell;
-            callback?: Cell;
-            queryID?: number;
-        },
-    ) {
-        await provider.internal(via, {
-            value: opts.value,
-            sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell()
-                .storeUint(Opcodes.checkBlock, 32)
-                .storeRef(
-                    beginCell().storeBuffer(opts.block.fileHash, 32).storeBuffer(opts.block.rootHash, 32).endCell(),
-                )
-                .storeRef(opts.signatures)
-                .storeUint(opts.queryID ?? 0, 64)
-                .storeMaybeRef(opts.callback)
-                .endCell(),
-        });
-    }
-
     async getBalance(provider: ContractProvider) {
         return (await provider.getState()).balance;
     }
@@ -124,11 +89,9 @@ export class LiteClient implements Contract {
     async getState(provider: ContractProvider) {
         const result = await provider.get('get_state', []);
         return {
-            currentSeqno: result.stack.readNumber(),
             currentEpochSince: result.stack.readNumber(),
-            currentEpochUntil: result.stack.readNumber(),
-            currentCutoffWeight: result.stack.readBigNumber(),
-            currentValidatorsList: result.stack.readCell(),
+            pastEpochs: result.stack.readCell(),
+            currentEpochData: result.stack.readCell(),
         };
     }
 }
