@@ -12,11 +12,12 @@ const int error::invalid_epoch             = 116;
 const int error::epoch_lib_not_set         = 117;
 
 ;;; TransactionChecker
-const int error::tx_not_found_in_block     = 200;
+const int error::key_not_found             = 200;
 const int error::invalid_tx_hash           = 201;
 const int error::not_lite_client           = 202;
 const int error::sc_block_not_in_mc_state  = 203;
 const int error::invalid_sc_proof          = 204;
+const int error::invalid_epoch_for_block   = 205;
 
 ;;; LibStore
 const int error::not_owner = 400;
@@ -38,5 +39,5 @@ const int cell_type::merkle_proof      = 3;
 const int cell_type::merkle_update     = 4;
 
 
-const int lite_client::max_past_epochs = 10;
-const int tx_checker::max_past_epochs  = 10;
+const int lite_client::max_past_epochs = 1000;
+const int tx_checker::max_past_epochs  = 1000;
