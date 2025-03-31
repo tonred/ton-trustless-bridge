@@ -92,6 +92,10 @@ function maskFromLevel(level: number) {
     return 0;
 }
 
+export function convertToLibraryRef(c: Cell): Cell {
+    return beginCell().storeUint(2, 8).storeBuffer(c.hash(), 32).endCell({exotic: true});
+}
+
 export function convertToPrunedBranch(c: Cell, sameLevel: boolean = false): Cell {
     const level = c.level();
     const newLevel = sameLevel && level > 0 ? level : level + 1;

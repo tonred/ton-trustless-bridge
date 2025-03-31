@@ -1,121 +1,308 @@
-import { Cell, OpenedContract, toNano } from '@ton/core';
-import { TransactionChecker } from '../wrappers/TransactionChecker';
-import { compile, NetworkProvider } from '@ton/blueprint';
-import { TransactionCheckerContactless } from '../wrappers/TransactionCheckerContactless';
-import { selectNetwork } from './imports/ui';
+import { Cell, CellType, Dictionary, OpenedContract, toNano } from '@ton/core';
+import { NetworkProvider } from '@ton/blueprint';
 import { LiteClient } from '../wrappers/LiteClient';
 import { Client } from './imports/client';
-import { getPrevKeyBlockSeqnoFromBlock, getSeqnoFromBlock, prepareKeyBlock } from './imports/block';
-import { packSignatures } from './imports/validators';
-import { sha256, sha256_sync } from '@ton/crypto';
+import { setSignWithGlobalId } from './imports/utils/sign';
+import { selectNetwork } from './imports/ui';
+import { packEpochData, packSignatures, parseConfigParamValidators, parseEpochData } from './imports/validators';
+import { getConfigFromBlock, getPrevKeyBlockSeqnoFromBlock, getSeqnoFromBlock, prepareKeyBlock } from './imports/block';
+import deployLibStore from './deployLibStore';
+import { sha256 } from '@ton/crypto';
 
-function delay(s: number) {
-    return new Promise((resolve) => setTimeout(resolve, s * 1000));
+class TimeUtils {
+    static delay(seconds: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    }
 }
 
-async function getLastKeySeqno(client: Client) {
-    const mcInfo = await client.liteClient.getMasterchainInfo();
-    let lastId = {
-        workchain: mcInfo.last.workchain,
-        seqno: mcInfo.last.seqno,
-        shard: mcInfo.last.shard,
-    };
-    const lastBlockHeader = await client.httpClient.getBlockHeader(lastId);
-    return lastBlockHeader.prev_key_block_seqno;
+class LiteClientError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'LiteClientError';
+    }
 }
 
-async function sendNewKeyBlock(
-    provider: NetworkProvider,
-    client: Client,
-    liteClient: OpenedContract<LiteClient>,
-    newSeqno: number,
-) {
-    console.log(`Found a new key block ${newSeqno}`);
-    let state = await liteClient.getState();
-    const mcInfo = await client.liteClient.getMasterchainInfo();
-    const keyBlockFullId = await client.httpClient.lookUpBlock(mcInfo.last.workchain, mcInfo.last.shard, newSeqno);
-    const nextKeyBlockData = (await client.liteClient.getBlock(keyBlockFullId)).data;
-    const nextKeyBlockFileHash = await sha256(nextKeyBlockData);
-    const nextKeyBlock = Cell.fromBoc(nextKeyBlockData)[0];
-    const prevKeyBlockSeqno = getPrevKeyBlockSeqnoFromBlock(nextKeyBlock);
-    if (state.currentSeqno < prevKeyBlockSeqno) {
-        await sendNewKeyBlock(provider, client, liteClient, prevKeyBlockSeqno);
-    }
+/**
+ * Manages epoch data operations
+ */
+class EpochManager {
+    /**
+     * Retrieves and parses the current epoch state from a LiteClient
+     */
+    static async getCurrentEpochState(liteClient: OpenedContract<LiteClient>, client: Client) {
+        try {
+            const state = await liteClient.getState();
+            console.log('Found LiteClient with state:', state);
 
-    state = await liteClient.getState();
-    if (state.currentSeqno !== prevKeyBlockSeqno) {
-        throw Error('Failed to Sync new key blocks');
-    }
-    const signatures = await client.httpClient.getMasterchainBlockSignatures(newSeqno);
-    await liteClient.sendNewKeyBlock(provider.sender(), {
-        value: liteClient.address.workChain == 0 ? toNano('0.05') : toNano('1'),
-        block: {
-            fileHash: nextKeyBlockFileHash,
-            blockProof: prepareKeyBlock(nextKeyBlock),
-        },
-        signatures: packSignatures(signatures, state.currentCutoffWeight, state.currentValidatorsList),
-    });
-    for (let i = 0; i < 10; i++) {
-        await delay(2);
-        state = await liteClient.getState();
-        if (state.currentSeqno == newSeqno) {
-            break;
+            let currentEpochDataRaw;
+            if (state.currentEpochData.type == CellType.Library) {
+                currentEpochDataRaw = await client.loadLibrary(
+                    state.currentEpochData.beginParse(true).skip(8).loadBuffer(32),
+                );
+            } else {
+                currentEpochDataRaw = state.currentEpochData;
+            }
+
+            if (!currentEpochDataRaw) {
+                throw new LiteClientError('Failed to load current epoch data');
+            }
+
+            return parseEpochData(currentEpochDataRaw);
+        } catch (error) {
+            if (error instanceof LiteClientError) {
+                throw error;
+            }
+            console.log(error);
+            throw new LiteClientError(`Error getting epoch state: ${error}`);
         }
     }
-    if (state.currentSeqno == newSeqno) {
-        console.log(`New key block ${state.currentSeqno} successfully synced`);
-    } else {
-        throw Error('Failed to Sync new key blocks');
+
+    /**
+     * Retrieves the current epoch ID
+     */
+    static async getCurrentEpochId(client: Client): Promise<number> {
+        const config = (await client.loadConfig())!;
+        const configParam34 = Dictionary.loadDirect(Dictionary.Keys.Uint(32), Dictionary.Values.Cell(), config).get(
+            34,
+        )!;
+
+        const { utimeSince } = parseConfigParamValidators(configParam34);
+        return utimeSince;
+    }
+
+    /**
+     * Retrieves the epoch ID by key block seqno
+     */
+    static async getEpochIdByKeyBlock(client: Client, seqno: number): Promise<number> {
+        const config = (await client.loadConfig())!;
+        const configParam34 = Dictionary.loadDirect(Dictionary.Keys.Uint(32), Dictionary.Values.Cell(), config).get(
+            34,
+        )!;
+
+        const { utimeSince } = parseConfigParamValidators(configParam34);
+        return utimeSince;
     }
 }
 
-async function syncNewBlock(
-    provider: NetworkProvider,
-    client: Client,
-    liteClient: OpenedContract<LiteClient>,
-    stateSeqno: number,
-    waitForNew: boolean,
-) {
-    while (true) {
-        const lastKeySeqno = await getLastKeySeqno(client);
-        if (stateSeqno == lastKeySeqno) {
-            console.log('No new key blocks found');
-        } else if (stateSeqno > lastKeySeqno) {
-            console.log('LiteClient current key block seqno is grater then in network');
-            console.log('May be RPC error or wrong network');
+/**
+ * Handles key block synchronization operations
+ */
+class KeyBlockSynchronizer {
+    private provider: NetworkProvider;
+    private sourceClient: Client;
+    private targetClient: Client;
+    private liteClient: OpenedContract<LiteClient>;
+
+    constructor(
+        provider: NetworkProvider,
+        sourceClient: Client,
+        targetClient: Client,
+        liteClient: OpenedContract<LiteClient>,
+    ) {
+        this.provider = provider;
+        this.sourceClient = sourceClient;
+        this.targetClient = targetClient;
+        this.liteClient = liteClient;
+    }
+
+    /**
+     * Process a new key block
+     */
+    async processNewKeyBlock(keyBlock: Cell, keyBlockFileHash: Buffer): Promise<void> {
+        const isTon = false;
+        let { currentEpochSince, currentEpochData } = await this.liteClient.getState();
+        const currentEpochDataLoaded = await this.targetClient.loadLibrary(
+            currentEpochData.beginParse(true).skip(8).loadBuffer(32),
+        );
+
+        if (!currentEpochDataLoaded) {
+            throw new LiteClientError('Failed to load current epoch data library');
+        }
+
+        const state = parseEpochData(currentEpochDataLoaded);
+
+        const newConfig = getConfigFromBlock(keyBlock);
+        const keyBlockSeqno = getSeqnoFromBlock(keyBlock);
+        const p32 = newConfig.get(32)!;
+        const p34 = newConfig.get(34)!;
+        const prevConfig = parseConfigParamValidators(p32);
+        const { utimeSince, utimeUntil } = parseConfigParamValidators(p34);
+
+        let withPrevEpoch = prevConfig.utimeUntil != utimeSince;
+
+        if (currentEpochSince == utimeSince) {
+            console.log('New epoch is already synced');
+            return;
+        }
+        if (withPrevEpoch) {
+            console.log('New epoch sync with prev epoch included: ', withPrevEpoch);
+        }
+        const epochData = packEpochData(p34);
+
+        console.log('Found new key block: ', keyBlockSeqno, 'epochId: ', utimeSince);
+
+        await deployLibStore(this.provider, isTon ? toNano('0.03') : toNano('10'), epochData);
+
+        const signatures = await this.sourceClient.httpClient.getMasterchainBlockSignatures(keyBlockSeqno);
+
+        await this.liteClient.sendNewKeyBlock(this.provider.sender(), {
+            value: isTon ? toNano('0.1') : toNano('5'),
+            block: {
+                fileHash: keyBlockFileHash,
+                blockProof: prepareKeyBlock(keyBlock, withPrevEpoch),
+            },
+            signatures: packSignatures(signatures, state.cutoffWeight, state.validatorsList),
+        });
+
+        await this.waitForEpochSync(utimeSince);
+    }
+
+    /**
+     * Waits for epoch synchronization to complete
+     */
+    private async waitForEpochSync(expectedEpochId: number, maxAttempts = 10): Promise<void> {
+        for (let i = 0; i < maxAttempts; i++) {
+            await TimeUtils.delay(2);
+            const { currentEpochSince } = await this.liteClient.getState();
+
+            if (currentEpochSince == expectedEpochId) {
+                console.log(`New epoch ${currentEpochSince} successfully synced`);
+                return;
+            }
+        }
+
+        throw new LiteClientError('Failed to sync new key blocks within timeout period');
+    }
+
+    /**
+     * Synchronizes with new blocks, optionally waiting for future blocks
+     */
+    async syncNewBlock(waitForNew: boolean): Promise<boolean> {
+        try {
+            while (true) {
+                const currentEpochData = await EpochManager.getCurrentEpochState(this.liteClient, this.targetClient);
+                const currentEpochId = currentEpochData.utimeSince;
+
+                let blocksToProcess = [];
+                let keyBlockSeqno = undefined;
+                for (let i = 0; i < 100; i++) {
+                    let keyBlock = await this.sourceClient.getKeyBlock(keyBlockSeqno);
+                    if (!keyBlock) {
+                        break;
+                    }
+                    keyBlockSeqno = getPrevKeyBlockSeqnoFromBlock(
+                        keyBlock.block,
+                        this.sourceClient.networkConfig.isTycho,
+                    );
+                    const newConfig = getConfigFromBlock(keyBlock.block);
+                    const p34 = newConfig.get(34)!;
+                    const epochId = parseConfigParamValidators(p34).utimeSince;
+                    if (currentEpochId == epochId) {
+                        break;
+                    } else if (currentEpochId > epochId) {
+                        console.log("LiteClient's current epoch ID is greater than the one in the network.");
+                        console.log('This could be due to an RPC error or an incorrect network configuration.');
+                        return false;
+                    }
+                    blocksToProcess.push(keyBlock);
+                }
+                console.log('Found new ', blocksToProcess.length, 'epochs to sync');
+                for (let block of blocksToProcess.reverse()) {
+                    await this.processNewKeyBlock(block.block, block.fileHash);
+                }
+                if (waitForNew) {
+                    await TimeUtils.delay(60);
+                } else {
+                    break;
+                }
+            }
+
+            return true;
+        } catch (error) {
+            console.log(error);
+            console.error(`Block synchronization failed: ${error}`);
             return false;
-        } else {
-            await sendNewKeyBlock(provider, client, liteClient, lastKeySeqno);
-        }
-        if (waitForNew) {
-            await delay(60);
-        } else {
-            break;
         }
     }
-    return true;
 }
 
+/**
+ * Main application orchestrator
+ */
+class LiteClientSynchronizer {
+    private provider: NetworkProvider;
+
+    constructor(provider: NetworkProvider) {
+        this.provider = provider;
+    }
+
+    /**
+     * Initializes clients and LiteClient
+     */
+    private async initialize() {
+        const ui = this.provider.ui();
+
+        // Set global ID if provided
+        if (process.env.GLOBAL_ID) {
+            setSignWithGlobalId(parseInt(process.env.GLOBAL_ID));
+        }
+
+        // Initialize clients
+        const sourceClient = new Client(await selectNetwork('to sync blocks from(source)', this.provider));
+        const targetClient = new Client(await selectNetwork('to sync blocks to(target)', this.provider));
+
+        // Get LiteClient address and create instance
+        const liteClientAddress = await ui.inputAddress('Input LiteClient contract address: ');
+        const liteClient = this.provider.open(LiteClient.createFromAddress(liteClientAddress));
+
+        return { sourceClient, targetClient, liteClient, ui };
+    }
+
+    /**
+     * Main entry point
+     */
+    async run() {
+        try {
+            const { sourceClient, targetClient, liteClient, ui } = await this.initialize();
+
+            // Verify LiteClient state
+            try {
+                await liteClient.getState();
+            } catch (error) {
+                console.log('LiteClient not found or not valid address:', error);
+                return;
+            }
+            // Set up clients and synchronize
+            await targetClient.setupLiteClient();
+            await sourceClient.setupLiteClient();
+
+            // Get current epoch data
+            const currentEpochData = await EpochManager.getCurrentEpochState(liteClient, targetClient);
+            console.log('Current epoch data:', currentEpochData);
+
+            const synchronizer = new KeyBlockSynchronizer(this.provider, sourceClient, targetClient, liteClient);
+
+            // First sync
+            const syncResult = await synchronizer.syncNewBlock(false);
+            if (!syncResult) {
+                return;
+            }
+
+            // Optional continuous sync
+            if (await ui.prompt('Wait for new key blocks?')) {
+                const currentEpochData = await EpochManager.getCurrentEpochState(liteClient, targetClient);
+                await synchronizer.syncNewBlock(true);
+            }
+        } catch (error) {
+            console.error(`Synchronization failed: ${error}`);
+        }
+    }
+}
+
+/**
+ * Main entry point
+ */
 export async function run(provider: NetworkProvider) {
-    const ui = provider.ui();
-    const liteClientAddress = await ui.inputAddress('Input LiteClient contract address: ');
-    const liteClient = provider.open(LiteClient.createFromAddress(liteClientAddress));
-    let state;
-    try {
-        state = await liteClient.getState();
-    } catch (e) {
-        console.log('LiteClient not found or not valid address');
-        return;
-    }
-    console.log('Found LiteClient with state:', state);
-    const network = await selectNetwork('to sync blocks from', provider);
-    const client = new Client(network);
-    await client.setupLiteClient();
-    const r = await syncNewBlock(provider, client, liteClient, state.currentSeqno, false);
-    if (!r) {
-        return;
-    }
-    if (await ui.prompt('Wait for new key blocks?')) {
-        const r = await syncNewBlock(provider, client, liteClient, state.currentSeqno, true);
-    }
+    const synchronizer = new LiteClientSynchronizer(provider);
+    await synchronizer.run();
 }

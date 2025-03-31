@@ -6,8 +6,12 @@ export interface Network {
     name: string;
     networkId: number;
     httpApiEndpoint: string;
+    rpcApiEndpoint?: string;
     httpApiKey?: string;
-    globalConfig: string | NetworkGlobalConfig;
+    globalConfig?: string | NetworkGlobalConfig;
+    valueMultiplier?: number;
+    isTycho?: boolean;
+    proofChainApi?: string;
 }
 
 interface NetworkGlobalConfig {

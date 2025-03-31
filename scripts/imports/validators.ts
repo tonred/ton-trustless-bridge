@@ -10,7 +10,7 @@ export function verifyBlockSignature(
         node_id_short: string;
         signature: string;
     }[],
-    pubKeys: { pubkey: string; nodeIdShort: string }[],
+    pubKeys: { pubkey: string; nodeIdShort: string }[]
 ) {
     let to_sign = new Uint8Array(68);
     to_sign.set([0x70, 0x6e, 0x0b, 0xc5], 0);
@@ -31,7 +31,7 @@ export function prepareValidatorsList(mainValidators: number, validatorsCell: Ce
     const validators = Dictionary.loadDirect(
         Dictionary.Keys.Uint(16),
         Dictionary.Values.Buffer(5 + 32 + 8),
-        validatorsCell,
+        validatorsCell
     );
     let totalWeight = 0n;
     for (let k = 0; k < mainValidators; k++) {
@@ -69,7 +69,7 @@ export function parseConfigParamValidators(configCell: Cell, stripNonMainValidat
                 adnlAddress = src.loadBuffer(32);
             }
             return { pubkey: pubkey.toString('base64'), nodeIdShort, weight, adnlAddress };
-        },
+        }
     };
     let cs = configCell.beginParse();
     if (cs.loadUint(8) !== 18) {
@@ -95,10 +95,35 @@ export function parseConfigParamValidators(configCell: Cell, stripNonMainValidat
     return { utimeSince, utimeUntil, total, main, totalWeight, validators, validatorsCell };
 }
 
+export function packEpochData(configParam34: Cell): Cell {
+    const config = parseConfigParamValidators(configParam34);
+    const { cutoffWeight, newValidatorsList } = prepareValidatorsList(config.main, config.validatorsCell);
+
+    return beginCell()
+        .storeUint(config.utimeSince, 32)
+        .storeUint(config.utimeUntil, 32)
+        .storeUint(config.main, 16)
+        .storeCoins(cutoffWeight)
+        .storeRef(newValidatorsList)
+        .endCell();
+}
+
+export function parseEpochData(data: Cell) {
+    const cs = data.beginParse();
+
+    return {
+        utimeSince: cs.loadUint(32),
+        utimeUntil: cs.loadUint(32),
+        main: cs.loadUint(16),
+        cutoffWeight: cs.loadCoins(),
+        validatorsList: cs.loadRef()
+    };
+}
+
 export function packSignatures(
     rawSignatures: { node_id_short: string; signature: string }[],
     cutoffWeight: bigint,
-    validatorsCell: Cell,
+    validatorsCell: Cell
 ): Cell {
     let signatures = Dictionary.empty(Dictionary.Keys.Uint(16), Dictionary.Values.Buffer(64));
     let validators = Dictionary.loadDirect(Dictionary.Keys.Uint(16), Dictionary.Values.Buffer(40), validatorsCell);
@@ -106,7 +131,7 @@ export function packSignatures(
     for (let i = 0; i < validators.size; i++) {
         const validator = validators.get(i)!;
         let signature = rawSignatures.find(
-            (s) => s.node_id_short == _computeNodeIdShort(validator.subarray(0, 32)).toString('base64'),
+            (s) => s.node_id_short == _computeNodeIdShort(validator.subarray(0, 32)).toString('base64')
         );
         if (signature) {
             signatures.set(i, Buffer.from(signature.signature, 'base64'));
