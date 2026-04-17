@@ -10,6 +10,7 @@ const int error::invalid_signature         = 114;
 const int error::not_enough_signatures     = 115;
 const int error::invalid_epoch             = 116;
 const int error::epoch_lib_not_set         = 117;
+const int error::block_id_mismatch         = 118;
 
 ;;; TransactionChecker
 const int error::key_not_found             = 200;

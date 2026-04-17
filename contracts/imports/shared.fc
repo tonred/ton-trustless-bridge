@@ -2,17 +2,110 @@
 #include "utils.fc";
 #include "dict.fc";
 
+const int tl::simplex_data_to_sign = 0xf83de3a8;
+const int tl::finalize_vote = 0x05e1a740;
+const int tl::candidate_hash_ordinary = 0xdcbcf9e8;
+const int tl::candidate_hash_empty = 0x33d9b472;
+const int tl::candidate_parent_some = 0xf19a4b1a;
+const int tl::candidate_parent_none = 0xa9cccb22;
+const int tl::candidate_id = 0x3fcd91b6;
+
+const int FULL_SHARD = 1 << 63;
+
+int slice_hash2(slice s1, slice s2) inline asm "2 PUSHINT HASHEXT_SHA256";
+
+(int, int, builder) begin_hash_candidate(slice candidate) inline {
+    int candidate_type = candidate~load_uint(4);
+    int seqno = candidate~load_uint(32);
+
+    if (candidate_type == 0) {
+        slice collated_file_hash = candidate~load_bits(256);
+
+        builder to_hash_high = begin_cell().store_slice(collated_file_hash);
+
+        if (candidate~load_int(1)) {
+            int slot = candidate~load_uint(32);
+            slice candidate_hash = candidate~load_bits(256);
+            to_hash_high = to_hash_high
+                .store_uint(tl::candidate_parent_some, 32)
+                .store_uint(tl::candidate_id, 32)
+                .store_uint(slot, 32)
+                .store_slice(candidate_hash);
+        } else {
+            to_hash_high = to_hash_high.store_uint(tl::candidate_parent_none, 32);
+        }
+
+        candidate.end_parse();
+        return (tl::candidate_hash_ordinary, seqno, to_hash_high);
+    } else {
+        int slot = candidate~load_uint(32);
+        slice candidate_hash = candidate~load_bits(256);
+        candidate.end_parse();
+        builder to_hash_high = begin_cell()
+            .store_uint(tl::candidate_id, 32)
+            .store_uint(slot, 32)
+            .store_slice(candidate_hash);
+
+        return (tl::candidate_hash_empty, seqno, to_hash_high);
+    }
+}
+
+int hash_candidate(slice candidate, int root_hash, int file_hash) inline {
+    (int tag, int seqno, builder to_hash_high) = begin_hash_candidate(candidate);
+
+    slice to_hash_low = begin_cell()
+        .store_uint(tag, 32)
+        .store_int(MASTERCHAIN, 32) ;; tonNode.blockIdExt.workchain
+        .store_uint(FULL_SHARD, 64) ;; tonNode.blockIdExt.shard
+        .store_int(seqno, 32)       ;; tonNode.blockIdExt.seqno
+        .store_uint(root_hash, 256) ;; tonNode.blockIdExt.root_hash
+        .store_uint(file_hash, 256) ;; tonNode.blockIdExt.file_hash
+        .end_cell()
+        .begin_parse();
+
+    return slice_hash2(to_hash_low, to_hash_high.end_cell().begin_parse());
+}
+
+(cell, slice) parse_signatures_data(slice signatures_data, int root_hash, int file_hash) inline {
+    cell signatures = signatures_data~load_ref();
+
+    int slot = signatures_data~load_uint(32);
+    slice session_id = signatures_data~load_bits(256);
+
+    cell candidate = signatures_data~load_ref();
+    signatures_data.end_parse();
+
+    int candidate_hash = hash_candidate(candidate.begin_parse(), root_hash, file_hash);
+
+    slice to_sign = begin_cell()
+        .store_uint(tl::simplex_data_to_sign, 32)
+        .store_slice(session_id)
+        .store_uint(44, 8) ;; data len (1 byte)
+        .store_uint(tl::finalize_vote, 32)
+        .store_uint(tl::candidate_id, 32)
+        .store_uint(slot, 32)
+        .store_uint(candidate_hash, 256)
+        .store_int(0, 24) ;; padding (3 bytes)
+        .end_cell()
+        .begin_parse();
+
+    return (signatures, to_sign);
+}
+
 ;;; Verifies that the signatures of a block have sufficient collective weight >= `cutoff_weight`
 ;;; Iterates over the signatures and checks each one against the public key from the validators dict.
 ;;; Throws an error if signatures are insufficient or invalid.
 () verify_block_signatures(cell signatures, cell validators, int root_hash, int file_hash, int cutoff_weight) impure inline {
-    ;; Prepare the data to be signed
-    slice hash = begin_cell()
-        .store_uint(0x706e0bc5, 32)
-        .store_uint(root_hash, 256)
-        .store_uint(file_hash, 256)
-        .end_cell()
-        .begin_parse();
+    ;; Prepare the data to be signed (ordinary)
+    ;; slice hash = begin_cell()
+    ;;     .store_uint(0x706e0bc5, 32)
+    ;;     .store_uint(root_hash, 256)
+    ;;     .store_uint(file_hash, 256)
+    ;;     .end_cell()
+    ;;     .begin_parse();
+
+    ;; Prepare the data to be signed (simplex)
+    (signatures, slice hash) = parse_signatures_data(signatures.begin_parse(), root_hash, file_hash);
 
     int weight = 0;
     int key = 0;
@@ -95,7 +188,7 @@ cell store_epoch_data(
     account_block~skip_currency_collection();
     account_block~skip_bits(4 + 256);
     (slice tx, int found) = account_block.aug_dict_get(begin_cell().store_uint(lt, 64).end_cell().begin_parse());
-    throw_unless(error::tx_not_found_in_block, found);
+    throw_unless(error::key_not_found, found);
     int hash = tx~load_ref().cell_hash_0();
     throw_unless(error::invalid_tx_hash, hash == tx_id);
 }

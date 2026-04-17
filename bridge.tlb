@@ -2,7 +2,7 @@
 /// LiteClient
 ///
 new_key_block#11a78ffe block:^BridgeBlock
-    signatures:^(HashmapE 16 SignatureDescr) = InternalMsgBody;
+    signatures:^Signatures = InternalMsgBody;
 ok#ff8ff4e1 block_hash:uint256 = InternalMsgBody;
 
 get_epoch_data#bf1ddde8 epoch_utime_since:uint32
@@ -10,7 +10,6 @@ get_epoch_data#bf1ddde8 epoch_utime_since:uint32
 
 epoch_data#f60fba1d epoch_data_hash:uint256
     callback:(Maybe ^Cell) = InternalMsgBody;
-
 
 /// TransactionChecker
 check_transaction#ddab5b88 proof_chain:^(MERKLE_PROOF ProofChainRoot) tx_proof:^TransactionProof = InternalMsgBody;
@@ -22,7 +21,7 @@ sync_epoch#5323f31d epoch_id:uint32 = InternalMsgBody;
 
 proof_chain_root#_ {n:#}
   file_hash:uint256 vset_utime_since:uint32
-  mc_block:^Cell mc_signatures:^(Hashmap 16 bits512) head:(ProofChainHead ~n) = ProofChainRoot;
+  mc_block:^Cell mc_signatures:^Signatures head:(ProofChainHead ~n) = ProofChainRoot;
 
 proof_chain_head_empty#_ = ProofChainHead ~0;
 proof_chain_head_1#_ sc_block1:^Cell = ProofChainHead ~1;
@@ -42,8 +41,18 @@ _ R:bits256 s:bits256 = SignatureDescr;
 validator#_ public_key:bits256 weight:uint64 = ValidatorDescrShort;
 
 
+// signatures_ordinary#_ list:(Hashmap 16 SignatureDescr) = Signatures;
+signatures_simplex#_
+    list:^(Hashmap 16 SignatureDescr)
+    slot:uint32
+    session_id:bits256
+    candidate:^CandidateHashData
+    = Signatures;
 
+candidate_hash_ordinary#0 seqno:uint32 collated_file_hash:bits256 parent:(Maybe CandidateId) = CandidateHashData;
+candidate_hash_empty#1 seqno:uint32 candiate_id:CandidateId = CandidateHashData;
 
+candiate_id#_ slot:uint32 hash:bits256 = CandidateId;
 
 /// std
 bit$_ (## 1) = Bit;
